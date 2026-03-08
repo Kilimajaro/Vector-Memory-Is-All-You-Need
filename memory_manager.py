@@ -10,17 +10,12 @@ import logging
 import re
 from config import *
 
-# 配置日志
+# 配置日志 (只保留一处配置)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # 修改默认召回数量为10
 TOP_K_RETRIEVAL = 10
-
-# ==================== 日志配置 ====================
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
 
 # ==================== 数据结构定义 ====================
 class SentenceNode:
@@ -98,6 +93,7 @@ class VectorMemoryManager:
                     self.knowledge_graph[node_id] = kn
 
         self.cluster_model = MiniBatchKMeans(n_clusters=10, random_state=42)
+        # 初始化时先尝试更新聚类，以加载已有数据
         self._update_clusters()
 
     def _get_embedding(self, text):
@@ -137,6 +133,34 @@ class VectorMemoryManager:
             sents.append(buffer.strip())
         return sents
 
+    def _normalize_vector(self, vector):
+        """归一化向量"""
+        arr = np.array(vector, dtype='float32')
+        norm = np.linalg.norm(arr)
+        if norm > 1e-8:
+            return arr / norm
+        else:
+            # 返回一个小的随机向量，避免零向量
+            return np.random.normal(0, 0.1, VECTOR_DIM).astype('float32')
+
+    def _should_add_sentence_vector(self, sent_vector, para_vector):
+        """
+        判断句子向量是否应加入向量库。
+        过滤掉与段落主题无关的噪音句子。
+        """
+        if para_vector is None:
+            return True
+        
+        norm_para = np.linalg.norm(para_vector)
+        norm_sent = np.linalg.norm(sent_vector)
+        
+        if norm_para < 1e-8 or norm_sent < 1e-8:
+            return False
+            
+        similarity = np.dot(para_vector, sent_vector) / (norm_para * norm_sent)
+        # 相似度必须大于30%，否则视为噪音句子，不加入向量库
+        return similarity > 0.3
+
     def add_dialog(self, role, text):
         tid_para = self._generate_tid()
         # 1. 写 talk.txt
@@ -154,6 +178,7 @@ class VectorMemoryManager:
         # 2. 段落级
         para_node = ParagraphNode(tid_para, text)
         para_vector = self._get_embedding(text)
+        para_vector = self._normalize_vector(para_vector)
         para_node.para_vector = para_vector
         self.para_tree[tid_para] = para_node
 
@@ -162,10 +187,16 @@ class VectorMemoryManager:
         for i, sent in enumerate(sentences):
             sent_id = f"{tid_para}_sent{i}"
             sent_vector = self._get_embedding(sent)
+            sent_vector = self._normalize_vector(sent_vector)
             sent_node = SentenceNode(sent_id, sent, sent_vector, tid_para)
             para_node.add_sentence(sent_node)
             self.sent_map[sent_id] = sent_node
-            self._add_to_vector_db(sent_id, sent_vector, sent, 'sentence', tid_para)
+            
+            # 【核心修改】过滤低质量句子向量，不直接入库
+            if self._should_add_sentence_vector(sent_vector, para_vector):
+                self._add_to_vector_db(sent_id, sent_vector, sent, 'sentence', tid_para)
+            else:
+                logger.debug(f"句子向量相似度过低，已跳过入库: '{sent[:15]}...'")
 
         # 4. 段落向量入库
         self._add_to_vector_db(tid_para, para_vector, text, 'paragraph', None)
@@ -177,15 +208,6 @@ class VectorMemoryManager:
         return tid_para
 
     def _add_to_vector_db(self, vec_id, vector, text, vec_type, parent_tid):
-        if len(vector) != VECTOR_DIM:
-            vector = np.resize(vector, VECTOR_DIM)
-        norm = np.linalg.norm(vector)
-        if norm > 1e-8:
-            vector = vector / norm
-        else:
-            vector = np.random.normal(0, 0.1, VECTOR_DIM).astype('float32')
-            vector = vector / np.linalg.norm(vector)
-
         arr = np.array([vector], dtype='float32')
         self.vector_index.add(arr)
         new_idx = self.vector_index.ntotal - 1
@@ -215,6 +237,80 @@ class VectorMemoryManager:
             }
         with open(f"{KNOWLEDGE_DIR}/knowledge_graph.json", 'w', encoding='utf-8') as f:
             json.dump(kg_data, f, ensure_ascii=False, indent=2)
+
+    def _consolidate_low_similarity_sentences(self):
+        """
+        【新增功能】
+        定期整合向量库中相似度极低的句子向量（噪音）。
+        将这些句子从FAISS索引中移除，但保留在内存结构中以备他用。
+        """
+        logger.info("开始整合低相似度句子向量...")
+        low_sim_sentences_info = []  # 存储需要移除的句子元数据索引
+        
+        # 遍历所有句子类型的元数据
+        for i, meta in enumerate(self.vector_metadata):
+            if meta['type'] == 'sentence':
+                sent_id = meta['id']
+                if sent_id in self.sent_map:
+                    sent_node = self.sent_map[sent_id]
+                    para_id = sent_node.parent_para_id
+                    
+                    if para_id in self.para_tree:
+                        para_node = self.para_tree[para_id]
+                        para_vector = para_node.para_vector
+                        
+                        # 计算句子与其所属段落的相似度
+                        if para_vector is not None and sent_node.vector is not None:
+                            norm_para = np.linalg.norm(para_vector)
+                            norm_sent = np.linalg.norm(sent_node.vector)
+                            
+                            if norm_para > 1e-8 and norm_sent > 1e-8:
+                                similarity = np.dot(para_vector, sent_node.vector) / (norm_para * norm_sent)
+                                
+                                # 如果相似度低于5%，标记为待移除
+                                if similarity < 0.05:
+                                    logger.debug(f"标记低相似度句子 '{sent_node.text[:15]}...' (相似度: {similarity:.2f}) 待移除")
+                                    low_sim_sentences_info.append(i)
+        
+        if not low_sim_sentences_info:
+            logger.info("未发现需要整合的低相似度句子。")
+            return
+            
+        logger.info(f"发现 {len(low_sim_sentences_info)} 个低相似度句子，正在从索引中移除...")
+
+        # 创建新的元数据和向量列表，排除要移除的项
+        new_metadata = []
+        new_vectors = []
+        
+        for i, meta in enumerate(self.vector_metadata):
+            if i in low_sim_sentences_info:
+                continue  # 跳过要移除的
+                
+            if meta['index_pos'] < self.vector_index.ntotal:
+                try:
+                    vec = self.vector_index.reconstruct(meta['index_pos'])
+                    new_vectors.append(vec)
+                    new_metadata.append(meta)
+                except Exception as e:
+                    logger.warning(f"重建索引时无法获取向量 {meta['index_pos']}: {e}")
+                    new_metadata.append(meta)  # 即使没拿到向量也保留元数据，避免断链
+        
+        # 重建FAISS索引
+        if new_vectors:
+            dim = len(new_vectors[0])
+            new_index = faiss.IndexFlatIP(dim)
+            new_index.add(np.array(new_vectors).astype('float32'))
+            self.vector_index = new_index
+            
+            # 更新所有元数据中的索引位置
+            for new_i, meta in enumerate(new_metadata):
+                meta['index_pos'] = new_i
+                
+            self.vector_metadata = new_metadata
+            self._save_vector_db()
+            logger.info("低相似度句子整合完成，索引已重建。")
+        else:
+            logger.warning("没有有效向量可用于重建索引。")
 
     def _update_clusters(self):
         if len(self.vector_metadata) < 10:
@@ -262,22 +358,42 @@ class VectorMemoryManager:
                     sims.append((j, sim))
             sims.sort(key=lambda x: x[1], reverse=True)
             nodes[i].related_node_ids = [nodes[j].node_id for j, _ in sims[:3]]
+
+        # 【新增】在聚类更新后，执行一次低相似度句子整合
+        self._consolidate_low_similarity_sentences()
+        
         self._save_vector_db()
 
     def search(self, query, top_k=TOP_K_RETRIEVAL):
+        """
+        【核心修改】
+        重构搜索逻辑：优先检索知识级和段落级，最后才检索高质量的句子级。
+        """
         qv = self._get_embedding(query)
-        # 知识层
-        kg_res = self._knowledge_search(qv, top_k=5)
-        # 数据层
-        data_res = self._vector_search(qv, top_k=10)
-        # 融合
-        final = self._merge_results({'knowledge': kg_res, 'data': data_res}, query, top_k)
+        qv = self._normalize_vector(qv)
+
+        # 1. 优先知识层搜索 (顶层语义)
+        kg_res = self._knowledge_search(qv, top_k=3)
+
+        # 2. 段落级搜索 (中层语义)
+        para_res = self._vector_search(qv, top_k=5, vec_type='paragraph', min_score=0.0)
+
+        # 3. 句子级搜索 (底层细节，仅当结果不足时启用，且设高门槛)
+        # 如果前两级结果已经足够，就不需要去句子库里找了，因为句子库可能有很多干扰
+        combined_res = kg_res + para_res
+        if len(combined_res) < top_k:
+            remaining = top_k - len(combined_res)
+            # 句子级检索设置更高的分数阈值 (0.65)，确保相关性
+            sent_res = self._vector_search(qv, top_k=remaining * 2, vec_type='sentence', min_score=0.65)
+            combined_res.extend(sent_res)
+
+        # 融合结果
+        final = self._merge_results({'knowledge': kg_res, 'data': combined_res}, query, top_k)
         return final
 
     def _knowledge_search(self, qv, top_k=5):
         if not self.knowledge_graph:
             return []
-        qv = qv / (np.linalg.norm(qv) + 1e-8)
         nodes = list(self.knowledge_graph.values())
         centers = np.array([n.center_vector for n in nodes])
         dists = np.linalg.norm(centers - qv, axis=1)
@@ -292,25 +408,40 @@ class VectorMemoryManager:
                         'tid': pid,
                         'text': meta['text'],
                         'type': 'knowledge_item',
-                        'score': float(-dists[idx]),
+                        'score': float(-dists[idx]),  # 距离转分数
                         'cluster_id': node.node_id
                     })
         return results
 
-    def _vector_search(self, qv, top_k=10):
-        qv = np.array([qv], dtype='float32')
-        norm = np.linalg.norm(qv)
-        if norm > 1e-8:
-            qv = qv / norm
-        scores, indices = self.vector_index.search(qv, top_k * 2)
+    def _vector_search(self, qv, top_k=10, vec_type=None, min_score=0.0):
+        """增强版向量搜索，支持类型过滤和最低分数"""
+        if self.vector_index.ntotal == 0:
+            return []
+            
+        # 搜索比需要的数量多一些，以便过滤
+        search_k = min(top_k * 3, self.vector_index.ntotal)
+        scores, indices = self.vector_index.search(np.array([qv], dtype='float32'), search_k)
+        
         results = []
         seen = set()
+        
         for i, idx in enumerate(indices[0]):
             if idx < 0 or idx >= len(self.vector_metadata):
                 continue
+                
             meta = self.vector_metadata[idx]
+            
+            # 类型过滤
+            if vec_type and meta['type'] != vec_type:
+                continue
+                
+            # 分数过滤 (FAISS IP距离，越高越好)
+            if scores[0][i] < min_score:
+                continue
+                
+            # 去重处理 (基于tid)
             tid = meta.get('parent_tid') or meta['id']
-            if tid not in seen and scores[0][i] > 0.3:
+            if tid not in seen:
                 seen.add(tid)
                 results.append({
                     'tid': tid,
@@ -318,23 +449,34 @@ class VectorMemoryManager:
                     'type': meta['type'],
                     'score': float(scores[0][i])
                 })
+                
             if len(results) >= top_k:
                 break
+                
         return results
 
     def _merge_results(self, results, query, max_results=TOP_K_RETRIEVAL):
+        """增强版结果融合，按优先级排序"""
+        # 优先级：知识节点 > 段落 > 句子
+        priority_order = {'knowledge_item': 1, 'paragraph': 2, 'sentence': 3}
+        
         all_res = []
         for rtype, items in results.items():
             for it in items:
                 full = self._get_full_dialog_by_tid(it['tid'])
                 if full:
                     it['full_text'] = full
+                    # 添加优先级信息用于排序
+                    it['priority'] = priority_order.get(it['type'], 99)
                     all_res.append(it)
+        
+        # 按优先级(升序)和分数(降序)排序
         unique = {}
-        for r in sorted(all_res, key=lambda x: x['score'], reverse=True):
+        for r in sorted(all_res, key=lambda x: (-x['priority'], -x['score'])):
             tid = r['tid']
             if tid not in unique or r['score'] > unique[tid]['score']:
                 unique[tid] = r
+
         return list(unique.values())[:max_results]
 
     def _get_full_dialog_by_tid(self, tid):
