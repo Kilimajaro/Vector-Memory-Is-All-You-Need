@@ -49,7 +49,7 @@ class GradioDialogSystem:
         self.current_streaming_response = ""
         
     def generate_response_stream(self, prompt, context, progress=gr.Progress()):
-        """通过Ollama生成流式回复（优化版）"""
+        """通过Ollama生成流式回复（修复版）"""
         messages = []
         
         # 优化后的系统提示词
@@ -61,17 +61,14 @@ class GradioDialogSystem:
         )
 
         if context:
-            # 添加近期对话保持连贯性
-            for dialog in self.memory.get_recent_dialogs(3):  # 扩展至3轮对话
-                messages.append({"role": dialog['role'], "content": dialog['text']})
-            # 精简记忆展示格式，突出相关性
+            # 添加系统消息，包含记忆参考
             retrieval_content = "\n\n".join([
                 f"> {item['text'][:500]}..."  # 截取关键片段防止信息过载
-                for item in sorted(context, key=lambda x: x['score']>0.5, reverse=True)[:3]  # 仅用Top3相关记忆
+                for item in sorted(context, key=lambda x: x['score']>0.5, reverse=True)[:3]
             ])
             messages.append({
                 "role": "system",
-                "content": f"{system_prompt}\n\n相关记忆参考:\n{retrieval_content}\n\n接下来直接回答用户问题: {prompt}"
+                "content": f"{system_prompt}\n\n相关记忆参考:\n{retrieval_content}"
             })
         else:
             messages.append({
@@ -79,8 +76,14 @@ class GradioDialogSystem:
                 "content": f"{system_prompt}\n\n[无相关记忆，用常识回答]"
             })
         
-        # 用户问题保持纯净
-        messages.append({"role": "user", "content": prompt})  # 移除冗余指令
+        # 添加历史对话上下文（排除当前用户输入）
+        # 从conversation_history获取历史对话，排除最后一条（当前用户输入）
+        history_for_context = self.conversation_history[:-1]  # 排除当前用户输入
+        for dialog in history_for_context[-6:]:  # 取最近3对对话
+            messages.append({"role": dialog['role'], "content": dialog['content']})
+        
+        # 添加当前用户消息
+        messages.append({"role": "user", "content": prompt})
         
         try:
             with requests.post(
@@ -89,7 +92,7 @@ class GradioDialogSystem:
                     "model": GENERATION_MODEL,
                     "messages": messages,
                     "stream": True,
-                    "options": {"temperature": 0.7}  # 降低随机性增强聚焦
+                    "options": {"temperature": 0.7}
                 },
                 timeout=120,
                 stream=True
@@ -124,11 +127,12 @@ class GradioDialogSystem:
         
         progress(0.6, desc="生成回复中...")
         
-        self.current_streaming_response = ""
-        
-        progress(0.8, desc="准备保存...")
-        
+        # 添加用户输入到对话历史
         self.conversation_history.append({"role": "user", "content": user_input})
+        
+        # 启动流式生成器
+        self.response_generator = self.generate_response_stream(user_input, search_results)
+        self.current_streaming_response = ""
         
         progress(1.0, desc="完成!")
         return user_input, search_html, self._get_conversation_history_html(), True
@@ -646,6 +650,41 @@ class GradioDialogSystem:
         """
         return history_html
 
+    def stream_response_step(self):
+        """执行一步流式响应生成"""
+        if hasattr(self, 'response_generator') and self.response_generator is not None:
+            try:
+                chunk, accumulated = next(self.response_generator)
+                if chunk is None:
+                    # 流式结束，保存对话到记忆
+                    if self.conversation_history and self.conversation_history[-1]['role'] == 'user':
+                        user_msg = self.conversation_history[-1]['content']
+                        self.memory.add_dialog("user", user_msg)
+                    if accumulated:
+                        self.memory.add_dialog("assistant", accumulated)
+                        self.conversation_history.append({"role": "assistant", "content": accumulated})
+                        if len(self.conversation_history) > MAX_DIALOG_HISTORY * 2:
+                            self.conversation_history = self.conversation_history[-MAX_DIALOG_HISTORY * 2:]
+                    # 清理生成器
+                    self.response_generator = None
+                    return accumulated, True
+                else:
+                    self.current_streaming_response = accumulated
+                    return self.current_streaming_response, False
+            except StopIteration:
+                # 生成器结束
+                if self.current_streaming_response:
+                    if self.conversation_history and self.conversation_history[-1]['role'] == 'user':
+                        user_msg = self.conversation_history[-1]['content']
+                        self.memory.add_dialog("user", user_msg)
+                    self.memory.add_dialog("assistant", self.current_streaming_response)
+                    self.conversation_history.append({"role": "assistant", "content": self.current_streaming_response})
+                    if len(self.conversation_history) > MAX_DIALOG_HISTORY * 2:
+                        self.conversation_history = self.conversation_history[-MAX_DIALOG_HISTORY * 2:]
+                self.response_generator = None
+                return self.current_streaming_response, True
+        return "", True
+
 
 def create_interface():
     system = GradioDialogSystem()
@@ -903,22 +942,14 @@ def create_interface():
             return "", search_result, updated_conversation, search_result, True, ""
         
         def check_and_update_stream(state):
-            if state and system.current_streaming_response:
+            if state:  # 移除对system.current_streaming_response的检查
                 chunk, done = system.stream_response_step()
                 if done:
                     new_state = False
-                    system.memory.add_dialog("user", system.conversation_history[-1]['content'])
-                    system.memory.add_dialog("assistant", system.current_streaming_response)
-                    system.conversation_history.append({"role": "assistant", "content": system.current_streaming_response})
-                    if len(system.conversation_history) > MAX_DIALOG_HISTORY * 2:
-                        system.conversation_history = system.conversation_history[-MAX_DIALOG_HISTORY * 2:]
                     return system.current_streaming_response, system._get_conversation_history_html(), new_state
                 elif chunk:
                     return system.current_streaming_response, system._get_conversation_history_html(), state
             return current_response.value, conversation_display.value, state
-        
-        def finish_streaming():
-            return False, ""
         
         def update_status():
             return system.get_system_status_html()
