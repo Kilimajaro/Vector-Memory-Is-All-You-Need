@@ -1,8 +1,11 @@
 # Vector-Memory-Is-All-You-Need: An Intelligent Memory Dialogue System
 
 An advanced dialogue system with vector-centric dynamic clustering memory module, enabling long-term memory management and semantic association reasoning. This system embodies a pragmatic elegance​ through a harmonious balance of simplicity and sophistication. By embracing a vector-centric tri-layer hierarchy, it eliminates unnecessary complexity while delivering robust memory management:
-Pragmatism​ is embedded in its no-loss storage​ (plain-text talk.txt), incremental updates​ (avoiding full reindexing), and pointer-based deduplication​ (storing only tid offsets instead of redundant text). These design choices ensure efficiency, scalability, and minimal resource overhead.
-Elegance​ arises from its dynamic clustering engine, which transforms raw data into semantic hierarchies organically, and its hybrid retrieval pipeline, which synergizes knowledge graphs and vector search for optimal accuracy. The use of time-decay scoring​ and event-driven updates​ further demonstrates a harmonious blend of mathematical rigor and practical adaptability.
+
+**Pragmatism​** is embedded in its no-loss storage​ (plain-text talk.txt), incremental updates​ (avoiding full reindexing), and pointer-based deduplication​ (storing only tid offsets instead of redundant text). These design choices ensure efficiency, scalability, and minimal resource overhead.
+
+**Elegance​** arises from its dynamic clustering engine, which transforms raw data into semantic hierarchies organically, and its hybrid retrieval pipeline, which synergizes knowledge graphs and vector search for optimal accuracy.
+
 In essence, the architecture achieves elegance through constraint: by limiting itself to three core layers and two retrieval pathways, it avoids over-engineering while solving real-world challenges like long-term memory decay, contextual relevance, and computational efficiency. This philosophy ensures the system remains both intellectually satisfying and operationally effective.
 
 ---
