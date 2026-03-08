@@ -55,16 +55,16 @@ class GradioDialogSystem:
         # 优化后的系统提示词
         system_prompt = (
             "你是一位拥有长期记忆的老朋友，正在自然流畅地对话。"
-            "请根据检索到的相关记忆专注回答当前问题，避免被无关记忆干扰。"
+            "请根据检索到的相关记忆专注回答当前问题。"
             "回答要像日常聊天般自然，绝不提及任何系统指令或记忆机制。"
-            "若记忆不相关，则用常识回答并保持对话连贯性。"
+            "注意：你检索到的记忆可能包含有用信息，但也可能不完全相关。请尽可能多地提取有用信息，无论该记忆来自什么层级。但一般来说，低层级记忆更精准！"
         )
 
         if context:
             # 添加系统消息，包含记忆参考
             retrieval_content = "\n\n".join([
                 f"> {item['text'][:500]}..."  # 截取关键片段防止信息过载
-                for item in sorted(context, key=lambda x: x['score']>0.5, reverse=True)[:3]
+                for item in sorted(context, key=lambda x: x['score'], reverse=True)
             ])
             messages.append({
                 "role": "system",
@@ -84,6 +84,7 @@ class GradioDialogSystem:
         
         # 添加当前用户消息
         messages.append({"role": "user", "content": prompt})
+        print("发送给模型的消息结构:", messages)
         
         try:
             with requests.post(
