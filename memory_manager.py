@@ -238,80 +238,149 @@ class VectorMemoryManager:
         with open(f"{KNOWLEDGE_DIR}/knowledge_graph.json", 'w', encoding='utf-8') as f:
             json.dump(kg_data, f, ensure_ascii=False, indent=2)
 
-    def _consolidate_low_similarity_sentences(self):
-        """
-        【新增功能】
-        定期整合向量库中相似度极低的句子向量（噪音）。
-        将这些句子从FAISS索引中移除，但保留在内存结构中以备他用。
-        """
-        logger.info("开始整合低相似度句子向量...")
-        low_sim_sentences_info = []  # 存储需要移除的句子元数据索引
-        
-        # 遍历所有句子类型的元数据
-        for i, meta in enumerate(self.vector_metadata):
-            if meta['type'] == 'sentence':
-                sent_id = meta['id']
-                if sent_id in self.sent_map:
-                    sent_node = self.sent_map[sent_id]
-                    para_id = sent_node.parent_para_id
+    def _consolidate_high_similarity(self):
+            """
+            【新增功能】
+            定期整合向量库中相似度过高的句子和段落向量，减少冗余。
+            将相似度极高的向量合并，保留质量最高的一个。
+            """
+            logger.info("开始整合高相似度句子和段落向量...")
+            
+            # 收集所有需要检查的向量
+            vectors_to_check = []
+            meta_indices = []
+            
+            for i, meta in enumerate(self.vector_metadata):
+                if meta['type'] in ['sentence', 'paragraph']:
+                    if meta['index_pos'] < self.vector_index.ntotal:
+                        try:
+                            vec = self.vector_index.reconstruct(meta['index_pos'])
+                            if np.linalg.norm(vec) > 1e-6:  # 过滤零向量
+                                vectors_to_check.append(vec)
+                                meta_indices.append(i)
+                        except Exception as e:
+                            logger.warning(f"无法获取向量 {meta['index_pos']}: {e}")
+                            continue
+            
+            if len(vectors_to_check) < 2:
+                logger.info("向量数量不足，无需整合。")
+                return
+            
+            # 计算向量间的相似度矩阵
+            vectors_array = np.array(vectors_to_check)
+            similarity_matrix = np.dot(vectors_array, vectors_array.T)
+            
+            # 计算每个向量的范数用于归一化
+            norms = np.linalg.norm(vectors_array, axis=1, keepdims=True)
+            norms_matrix = norms * norms.T
+            norms_matrix = np.where(norms_matrix > 0, norms_matrix, 1)
+            similarity_matrix = similarity_matrix / norms_matrix
+            
+            # 查找高相似度向量对
+            high_sim_pairs = []
+            seen_indices = set()
+            
+            for i in range(len(vectors_array)):
+                if i in seen_indices:
+                    continue
                     
-                    if para_id in self.para_tree:
-                        para_node = self.para_tree[para_id]
-                        para_vector = para_node.para_vector
+                for j in range(i+1, len(vectors_array)):
+                    if j in seen_indices:
+                        continue
                         
-                        # 计算句子与其所属段落的相似度
-                        if para_vector is not None and sent_node.vector is not None:
-                            norm_para = np.linalg.norm(para_vector)
-                            norm_sent = np.linalg.norm(sent_node.vector)
-                            
-                            if norm_para > 1e-8 and norm_sent > 1e-8:
-                                similarity = np.dot(para_vector, sent_node.vector) / (norm_para * norm_sent)
-                                
-                                # 如果相似度低于5%，标记为待移除
-                                if similarity < 0.05:
-                                    logger.debug(f"标记低相似度句子 '{sent_node.text[:15]}...' (相似度: {similarity:.2f}) 待移除")
-                                    low_sim_sentences_info.append(i)
-        
-        if not low_sim_sentences_info:
-            logger.info("未发现需要整合的低相似度句子。")
-            return
+                    if similarity_matrix[i, j] > 0.9:  # 相似度阈值设为0.9
+                        # 获取对应的元数据
+                        meta_i = self.vector_metadata[meta_indices[i]]
+                        meta_j = self.vector_metadata[meta_indices[j]]
+                        
+                        # 计算质量分数（基于文本长度和向量范数）
+                        quality_i = len(meta_i['text']) + np.linalg.norm(vectors_array[i])
+                        quality_j = len(meta_j['text']) + np.linalg.norm(vectors_array[j])
+                        
+                        # 保留质量更高的
+                        if quality_i >= quality_j:
+                            high_sim_pairs.append((j, i))  # 合并j到i
+                            seen_indices.add(j)
+                        else:
+                            high_sim_pairs.append((i, j))  # 合并i到j
+                            seen_indices.add(i)
+                        break
             
-        logger.info(f"发现 {len(low_sim_sentences_info)} 个低相似度句子，正在从索引中移除...")
-
-        # 创建新的元数据和向量列表，排除要移除的项
-        new_metadata = []
-        new_vectors = []
-        
-        for i, meta in enumerate(self.vector_metadata):
-            if i in low_sim_sentences_info:
-                continue  # 跳过要移除的
-                
-            if meta['index_pos'] < self.vector_index.ntotal:
-                try:
-                    vec = self.vector_index.reconstruct(meta['index_pos'])
-                    new_vectors.append(vec)
-                    new_metadata.append(meta)
-                except Exception as e:
-                    logger.warning(f"重建索引时无法获取向量 {meta['index_pos']}: {e}")
-                    new_metadata.append(meta)  # 即使没拿到向量也保留元数据，避免断链
-        
-        # 重建FAISS索引
-        if new_vectors:
-            dim = len(new_vectors[0])
-            new_index = faiss.IndexFlatIP(dim)
-            new_index.add(np.array(new_vectors).astype('float32'))
-            self.vector_index = new_index
+            if not high_sim_pairs:
+                logger.info("未发现需要整合的高相似度向量。")
+                return
             
-            # 更新所有元数据中的索引位置
-            for new_i, meta in enumerate(new_metadata):
-                meta['index_pos'] = new_i
+            logger.info(f"发现 {len(high_sim_pairs)} 个高相似度向量对，正在整合...")
+            
+            # 确定需要保留和移除的索引
+            to_remove_indices = set()
+            for remove_idx, keep_idx in high_sim_pairs:
+                meta_remove = self.vector_metadata[meta_indices[remove_idx]]
+                meta_keep = self.vector_metadata[meta_indices[keep_idx]]
                 
-            self.vector_metadata = new_metadata
-            self._save_vector_db()
-            logger.info("低相似度句子整合完成，索引已重建。")
-        else:
-            logger.warning("没有有效向量可用于重建索引。")
-
+                logger.debug(f"合并: '{meta_remove['text'][:20]}...' -> '{meta_keep['text'][:20]}...'")
+                to_remove_indices.add(meta_indices[remove_idx])
+            
+            # 创建新的元数据和向量列表
+            new_metadata = []
+            new_vectors = []
+            
+            for i, meta in enumerate(self.vector_metadata):
+                if i in to_remove_indices:
+                    continue  # 跳过要移除的
+                    
+                if meta['index_pos'] < self.vector_index.ntotal:
+                    try:
+                        vec = self.vector_index.reconstruct(meta['index_pos'])
+                        new_vectors.append(vec)
+                        new_metadata.append(meta)
+                    except Exception as e:
+                        logger.warning(f"重建索引时无法获取向量 {meta['index_pos']}: {e}")
+                        new_metadata.append(meta)  # 保留元数据
+            
+            # 重建FAISS索引
+            if new_vectors:
+                dim = len(new_vectors[0])
+                new_index = faiss.IndexFlatIP(dim)
+                new_index.add(np.array(new_vectors).astype('float32'))
+                self.vector_index = new_index
+                
+                # 更新所有元数据中的索引位置
+                for new_i, meta in enumerate(new_metadata):
+                    meta['index_pos'] = new_i
+                    
+                self.vector_metadata = new_metadata
+                self._save_vector_db()
+                
+                logger.info(f"高相似度向量整合完成，移除了 {len(to_remove_indices)} 个冗余向量，索引已重建。")
+                
+                # 更新内存中的数据结构
+                self._cleanup_removed_vectors(to_remove_indices)
+            else:
+                logger.warning("没有有效向量可用于重建索引。")
+        
+    def _cleanup_removed_vectors(self, removed_meta_indices):
+        """清理被移除的向量对应的内存结构"""
+        removed_ids = []
+        for i in removed_meta_indices:
+            if i < len(self.vector_metadata):
+                meta = self.vector_metadata[i]
+                removed_ids.append(meta['id'])
+        
+        # 从sent_map和para_tree中清理
+        for vec_id in removed_ids:
+            if vec_id in self.sent_map:
+                del self.sent_map[vec_id]
+            
+            # 如果是段落，清理para_tree
+            if vec_id in self.para_tree:
+                # 先清理段落中的句子
+                para_node = self.para_tree[vec_id]
+                for sent_node in para_node.sentences:
+                    if sent_node.id in self.sent_map:
+                        del self.sent_map[sent_node.id]
+                del self.para_tree[vec_id]
+        
     def _update_clusters(self):
         if len(self.vector_metadata) < 10:
             return
@@ -359,15 +428,17 @@ class VectorMemoryManager:
             sims.sort(key=lambda x: x[1], reverse=True)
             nodes[i].related_node_ids = [nodes[j].node_id for j, _ in sims[:3]]
 
-        # 【新增】在聚类更新后，执行一次低相似度句子整合
-        self._consolidate_low_similarity_sentences()
+        # 【修改】在聚类更新后，执行一次高相似度向量整合
+        self._consolidate_high_similarity()
         
         self._save_vector_db()
+
 
     def search(self, query, top_k=TOP_K_RETRIEVAL):
         """
         【核心修改】
         重构搜索逻辑：优先检索知识级和段落级，最后才检索高质量的句子级。
+        最终结果会排除相似度低于0.3的结果，并确保返回完整对话对。
         """
         qv = self._get_embedding(query)
         qv = self._normalize_vector(qv)
@@ -387,9 +458,37 @@ class VectorMemoryManager:
             sent_res = self._vector_search(qv, top_k=remaining * 2, vec_type='sentence', min_score=0.65)
             combined_res.extend(sent_res)
 
-        # 融合结果
-        final = self._merge_results({'knowledge': kg_res, 'data': combined_res}, query, top_k)
-        return final
+        # 获取完整对话上下文
+        for result in combined_res:
+            full_context = self._get_full_dialog_by_tid(result['tid'])
+            if full_context:
+                result['full_text'] = full_context
+            else:
+                # 如果没有找到完整对话，至少保留当前文本
+                result['full_text'] = result['text']
+
+        # 【新增】最终过滤：排除相似度低于0.3的结果
+        final_filtered = []
+        for result in combined_res:
+            if 'score' in result and result['score'] >= 0.3:
+                # 确保有完整的对话文本
+                if 'full_text' not in result or not result['full_text']:
+                    result['full_text'] = result.get('text', '')
+                final_filtered.append(result)
+        
+        # 如果过滤后结果过少，尝试放宽限制
+        if len(final_filtered) < 2 and len(combined_res) > len(final_filtered):
+            logger.warning(f"高质量结果不足 ({len(final_filtered)}个)，放宽筛选标准")
+            # 放宽标准，但仍要求有完整对话
+            for result in combined_res:
+                if 'score' in result and result['score'] >= 0.1:  # 降低到0.1
+                    if 'full_text' not in result or not result['full_text']:
+                        result['full_text'] = result.get('text', '')
+                    final_filtered.append(result)
+        
+        # 去重和排序
+        unique_results = self._deduplicate_and_sort(final_filtered, top_k)
+        return unique_results
 
     def _knowledge_search(self, qv, top_k=5):
         if not self.knowledge_graph:
@@ -404,9 +503,12 @@ class VectorMemoryManager:
             for pid in node.paragraph_ids:
                 meta = next((m for m in self.vector_metadata if m['id'] == pid), None)
                 if meta:
+                    # 获取完整对话上下文
+                    full_context = self._get_full_dialog_by_tid(pid)
                     results.append({
                         'tid': pid,
                         'text': meta['text'],
+                        'full_text': full_context or meta['text'],  # 确保有完整文本
                         'type': 'knowledge_item',
                         'score': float(-dists[idx]),  # 距离转分数
                         'cluster_id': node.node_id
@@ -414,7 +516,7 @@ class VectorMemoryManager:
         return results
 
     def _vector_search(self, qv, top_k=10, vec_type=None, min_score=0.0):
-        """增强版向量搜索，支持类型过滤和最低分数"""
+        """增强版向量搜索，支持类型过滤和最低分数，并返回完整对话"""
         if self.vector_index.ntotal == 0:
             return []
             
@@ -438,14 +540,23 @@ class VectorMemoryManager:
             # 分数过滤 (FAISS IP距离，越高越好)
             if scores[0][i] < min_score:
                 continue
-                
-            # 去重处理 (基于tid)
+            
+            # 获取tid（句子级用parent_tid，段落级用自身id）
             tid = meta.get('parent_tid') or meta['id']
-            if tid not in seen:
-                seen.add(tid)
+            
+            # 获取完整对话上下文
+            full_context = self._get_full_dialog_by_tid(tid)
+            if not full_context:
+                full_context = meta['text']
+                
+            # 去重处理 (基于对话对hash)
+            context_hash = hash(full_context)
+            if context_hash not in seen:
+                seen.add(context_hash)
                 results.append({
                     'tid': tid,
                     'text': meta['text'],
+                    'full_text': full_context,  # 包含完整对话
                     'type': meta['type'],
                     'score': float(scores[0][i])
                 })
@@ -455,45 +566,103 @@ class VectorMemoryManager:
                 
         return results
 
-    def _merge_results(self, results, query, max_results=TOP_K_RETRIEVAL):
-        """增强版结果融合，按优先级排序"""
-        # 优先级：知识节点 > 段落 > 句子
-        priority_order = {'knowledge_item': 1, 'paragraph': 2, 'sentence': 3}
-        
-        all_res = []
-        for rtype, items in results.items():
-            for it in items:
-                full = self._get_full_dialog_by_tid(it['tid'])
-                if full:
-                    it['full_text'] = full
-                    # 添加优先级信息用于排序
-                    it['priority'] = priority_order.get(it['type'], 99)
-                    all_res.append(it)
-        
-        # 按优先级(升序)和分数(降序)排序
-        unique = {}
-        for r in sorted(all_res, key=lambda x: (-x['priority'], -x['score'])):
-            tid = r['tid']
-            if tid not in unique or r['score'] > unique[tid]['score']:
-                unique[tid] = r
-
-        return list(unique.values())[:max_results]
-
     def _get_full_dialog_by_tid(self, tid):
+        """获取完整的对话对（包含查询结果的前后对话）"""
         if not os.path.exists(self.talk_file):
             return None
+            
+        # 获取当前对话记录
         with open(self.talk_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    parts = line.strip().split('|', 1)
-                    if len(parts) == 2:
-                        try:
-                            meta = json.loads(parts[0])
-                            if meta['tid'] == tid:
-                                return parts[1]
-                        except Exception:
-                            continue
+            lines = f.readlines()
+            
+        # 查找匹配的对话
+        for i, line in enumerate(lines):
+            if line.strip():
+                parts = line.strip().split('|', 1)
+                if len(parts) == 2:
+                    try:
+                        meta = json.loads(parts[0])
+                        if meta['tid'] == tid:
+                            # 获取上下文对话，构建完整的对话对
+                            dialog_pairs = []
+                            
+                            # 向前查找：最多2条对话
+                            for j in range(max(0, i-1), i+1):
+                                if j < len(lines) and lines[j].strip():
+                                    pair_parts = lines[j].strip().split('|', 1)
+                                    if len(pair_parts) == 2:
+                                        try:
+                                            pair_meta = json.loads(pair_parts[0])
+                                            dialog_pairs.append({
+                                                'role': pair_meta['role'],
+                                                'text': pair_parts[1],
+                                                'timestamp': pair_meta['timestamp']
+                                            })
+                                        except:
+                                            continue
+                            
+                            # 向后查找：最多1条对话
+                            for j in range(i+1, min(i+2, len(lines))):
+                                if j < len(lines) and lines[j].strip():
+                                    pair_parts = lines[j].strip().split('|', 1)
+                                    if len(pair_parts) == 2:
+                                        try:
+                                            pair_meta = json.loads(pair_parts[0])
+                                            dialog_pairs.append({
+                                                'role': pair_meta['role'],
+                                                'text': pair_parts[1],
+                                                'timestamp': pair_meta['timestamp']
+                                            })
+                                        except:
+                                            continue
+                            
+                            # 确保至少有当前对话
+                            if not dialog_pairs:
+                                dialog_pairs.append({
+                                    'role': meta['role'],
+                                    'text': parts[1],
+                                    'timestamp': meta['timestamp']
+                                })
+                            
+                            # 按时间排序
+                            dialog_pairs.sort(key=lambda x: x['timestamp'])
+                            
+                            # 转换为对话格式
+                            return self._format_dialog_context(dialog_pairs)
+                    except Exception as e:
+                        logger.error(f"解析对话失败: {e}")
+                        continue
         return None
+
+    def _format_dialog_context(self, dialog_pairs):
+        """格式化对话上下文为可读字符串"""
+        if not dialog_pairs:
+            return ""
+        
+        formatted = []
+        for dialog in dialog_pairs:
+            role_name = "用户" if dialog['role'] == 'user' else "助手"
+            formatted.append(f"{role_name}: {dialog['text']}")
+        
+        return "\n".join(formatted)
+
+    def _deduplicate_and_sort(self, results, top_k):
+        """去重和排序结果"""
+        seen = set()
+        unique = []
+        
+        for result in results:
+            # 基于对话内容去重
+            if 'full_text' in result:
+                text_hash = hash(result['full_text'])
+                if text_hash not in seen:
+                    seen.add(text_hash)
+                    unique.append(result)
+        
+        # 按分数降序排序
+        unique.sort(key=lambda x: x.get('score', 0), reverse=True)
+        
+        return unique[:top_k]
 
     def get_recent_dialogs(self, limit=MAX_DIALOG_HISTORY):
         dialogs = []
