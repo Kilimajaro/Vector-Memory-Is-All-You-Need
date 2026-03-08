@@ -484,6 +484,26 @@ class GradioDialogSystem:
         
         return ''.join(pyramid_parts)
     
+    def _get_score_class(self, score):
+        if score > 0.7:
+            return "high-score"
+        elif score > 0.5:
+            return "medium-score"
+        else:
+            return "low-score"
+    
+    def stream_callback(self, chunk, accumulated):
+        if chunk is not None:
+            self.current_streaming_response = accumulated
+            return self.current_streaming_response, False
+        else:
+            self.memory.add_dialog("user", self.conversation_history[-1]['content'])
+            self.memory.add_dialog("assistant", self.current_streaming_response)
+            self.conversation_history.append({"role": "assistant", "content": self.current_streaming_response})
+            if len(self.conversation_history) > MAX_DIALOG_HISTORY * 2:
+                self.conversation_history = self.conversation_history[-MAX_DIALOG_HISTORY * 2:]
+            return self.current_streaming_response, True
+    
     def get_system_status_html(self):
         try:
             dialogs_count = len(self.memory.get_recent_dialogs(1000))
