@@ -411,8 +411,9 @@ class VectorMemoryManager:
             if not members:
                 continue
             center = self.cluster_model.cluster_centers_[cluster_id]
+            center_normalized = self._normalize_vector(center)  # 新增归一化
             node_id = f"kno_{cluster_id}"
-            kn = KnowledgeNode(node_id, center)
+            kn = KnowledgeNode(node_id, center_normalized)  # 使用归一化向量
             kn.paragraph_ids = [self.vector_metadata[para_indices[i]]['id'] for i in members]
             self.knowledge_graph[node_id] = kn
 
@@ -486,26 +487,40 @@ class VectorMemoryManager:
     def _knowledge_search(self, qv, top_k=5):
         if not self.knowledge_graph:
             return []
+        
         nodes = list(self.knowledge_graph.values())
+        print(nodes)
         centers = np.array([n.center_vector for n in nodes])
-        dists = np.linalg.norm(centers - qv, axis=1)
-        top_nodes_idx = np.argsort(dists)[:top_k]
+        print(centers.shape, qv.shape)
+        
+        # 计算余弦相似度而不是欧式距离
+        similarities = np.dot(centers, qv)  # 已归一化，直接点积就是余弦相似度
+        print(similarities)
+        
+        top_nodes_idx = np.argsort(similarities)[::-1][:top_k]  # 降序排序
+        
         results = []
         for idx in top_nodes_idx:
             node = nodes[idx]
+            similarity = similarities[idx]
+            
+            # 只保留有足够相似度的结果
+            if similarity < 0.3:  # 设置阈值
+                continue
+                
             for pid in node.paragraph_ids:
                 meta = next((m for m in self.vector_metadata if m['id'] == pid), None)
                 if meta:
-                    # 获取完整对话上下文
                     full_context = self._get_full_dialog_by_tid(pid)
                     results.append({
                         'tid': pid,
                         'text': meta['text'],
-                        'full_text': full_context or meta['text'],  # 确保有完整文本
+                        'full_text': full_context or meta['text'],
                         'type': 'knowledge_item',
-                        'score': float(dists[idx]),  # 距离转分数
+                        'score': float(similarity),  # 使用余弦相似度分数
                         'cluster_id': node.node_id
                     })
+        
         return results
 
     def _vector_search(self, qv, top_k=10, vec_type=None, min_score=0.0):
