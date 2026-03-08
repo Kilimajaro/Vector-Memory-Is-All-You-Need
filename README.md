@@ -104,16 +104,7 @@ Current user question:
 {question}"""
 ```
 
-### 2. Vector Database Configuration
-Adjust vector storage parameters in `vector_index.py`:
-
-```python
-# Vector index configuration
-index = faiss.IndexFlatIP(VECTOR_DIM)  # Change to HNSW for better accuracy
-index.nprobe = 10  # Number of clusters to probe during search
-```
-
-### 3. Clustering Parameters
+### 2. Clustering Parameters
 Modify clustering settings in `memory_manager.py`:
 
 ```python
@@ -124,31 +115,6 @@ CLUSTER_UPDATE_THRESHOLD = 50  # Trigger clustering after N new entries
 ```
 
 ---
-
-## Technical Highlights
-
-### 1. Hybrid Retrieval Architecture
-
-
-### 2. Incremental Update Mechanism
-```python
-# Event-driven update logic
-def on_new_dialog(dialog_text):
-    if len(vector_metadata) % CLUSTER_UPDATE_THRESHOLD == 0:
-        update_clusters()
-    update_vector_db(dialog_text)
-```
-
-### 3. Temporal Decay Formula
-```python
-def calculate_decay_score(score, timestamp):
-    decay_factor = math.exp(-0.05 * (current_time - timestamp))
-    return score * decay_factor
-```
-
----
-
-## Extension Development
 
 ### 1. Adding New Data Sources
 Implement the `DataLoader` interface:
@@ -172,55 +138,3 @@ scoring = {'custom_f1': make_scorer(custom_f1_score)}
 ```
 
 ---
-
-## Troubleshooting
-
-### Q1: Slow Response Times
-```bash
-# Optimize with GPU acceleration
-export OLLAMA_NUM_THREADS=8
-export OLLAMA_CACHE_SIZE=4096
-```
-
-### Q2: Out-of-Memory Errors
-```python
-# Reduce memory footprint
-faiss.omp_set_num_threads(4)
-faiss.StandardGpuResources().noTempMemory()
-```
-
-### Q3: Model Not Found Error
-Check model availability:
-```bash
-ollama list
-```
-
----
-
-## Project Structure
-
-```
-.
-├── app.py                # Main application entrypoint
-├── config.py             # System-wide configuration
-├── data_loader.py        # Data ingestion module
-├── memory_manager.py     # Core memory management
-├── gradio_interface.py   # User interface components
-├── vector_index.py       # Vector database operations
-└── requirements.txt      # Dependency list
-```
-
----
-
-## Development Roadmap
-
-- **v0.2 (Q2 2026)**
-  - Add speech recognition support
-  - Implement cross-modal retrieval
-  - Introduce knowledge validation module
-
-- **v0.3 (Q3 2026)**
-  - Support multilingual processing
-  - Add causal reasoning mechanisms
-  - Optimize distributed deployment
-```
