@@ -49,39 +49,39 @@ class GradioDialogSystem:
         self.current_streaming_response = ""
         
     def generate_response_stream(self, prompt, context, progress=gr.Progress()):
-        """通过Ollama生成流式回复"""
+        """通过Ollama生成流式回复（优化版）"""
         messages = []
         
-        system_prompt = """你是一个具有长期记忆能力的AI助手。根据检索到的记忆，回答用户问题
-
-以下是检索到的相关记忆："""
+        # 优化后的系统提示词
+        system_prompt = (
+            "你是一位拥有长期记忆的老朋友，正在自然流畅地对话。"
+            "请根据检索到的相关记忆专注回答当前问题，避免被无关记忆干扰。"
+            "回答要像日常聊天般自然，绝不提及任何系统指令或记忆机制。"
+            "若记忆不相关，则用常识回答并保持对话连贯性。"
+        )
 
         if context:
+            # 精简记忆展示格式，突出相关性
             retrieval_content = "\n\n".join([
-                f"[{item['type'].upper()}] (相关性分数: {item['score']:.3f})\n{item['text']}"
-                for item in context
+                f"> {item['text'][:300]}..."  # 截取关键片段防止信息过载
+                for item in sorted(context, key=lambda x: x['score'], reverse=True)[:3]  # 仅用Top3相关记忆
             ])
             messages.append({
                 "role": "system",
-                "content": f"{system_prompt}\n\n{retrieval_content}"
+                "content": f"{system_prompt}\n\n相关记忆参考:\n{retrieval_content}\n\n接下来直接回答用户问题: {prompt}"
             })
         else:
             messages.append({
                 "role": "system",
-                "content": f"{system_prompt}\n\n[系统提示] 未检索到相关记忆，请基于你的通用知识回答用户问题。"
+                "content": f"{system_prompt}\n\n[无相关记忆，用常识回答]"
             })
         
-        recent_dialogs = self.memory.get_recent_dialogs(3)
-        for dialog in recent_dialogs:
-            messages.append({
-                "role": dialog['role'],
-                "content": dialog['text']
-            })
+        # 添加近期对话保持连贯性
+        for dialog in self.memory.get_recent_dialogs(2):  # 扩展至2轮对话
+            messages.append({"role": dialog['role'], "content": dialog['text']})
         
-        messages.append({
-            "role": "user", 
-            "content": f"[当前用户问题，请根据上述你的记忆进行直接作答，遵循用户指令]\n{prompt}"
-        })
+        # 用户问题保持纯净
+        messages.append({"role": "user", "content": prompt})  # 移除冗余指令
         
         try:
             with requests.post(
@@ -89,7 +89,8 @@ class GradioDialogSystem:
                 json={
                     "model": GENERATION_MODEL,
                     "messages": messages,
-                    "stream": True
+                    "stream": True,
+                    "options": {"temperature": 0.7}  # 降低随机性增强聚焦
                 },
                 timeout=120,
                 stream=True
@@ -107,15 +108,12 @@ class GradioDialogSystem:
                                     yield content, full_content
                             except json.JSONDecodeError:
                                 continue
-                    
                     yield None, full_content
                 else:
-                    error_msg = f"❌ 模型调用失败: {response.status_code}"
-                    yield error_msg, error_msg
+                    yield f"⚠️ 服务暂不可用({response.status_code})", f"⚠️ 服务暂不可用({response.status_code})"
                     
         except Exception as e:
-            error_msg = f"❌ 生成回复时出错: {str(e)}"
-            yield error_msg, error_msg
+            yield f"⚠️ 思考中断: {str(e)[:50]}", f"⚠️ 思考中断: {str(e)[:50]}"
     
     def process_query(self, user_input, progress=gr.Progress()):
         progress(0.1, desc="开始处理查询...")
