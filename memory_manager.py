@@ -447,7 +447,7 @@ class VectorMemoryManager:
         
         # 1. 知识级搜索 - 无相似度筛选
         kg_results = self._knowledge_search(qv, top_k=5)
-        filtered_kg_results = [r for r in kg_results if r.get('score', 0) >= 0.7][:3]  # 仅保留高相关的知识节点
+        filtered_kg_results = [r for r in kg_results if r.get('score', 0) >= 0.5][:3]  # 仅保留高相关的知识节点
         all_results.extend(filtered_kg_results)
         print(f"知识级搜索结果: {len(kg_results)} -> 筛选后: {len(filtered_kg_results)}")
         
