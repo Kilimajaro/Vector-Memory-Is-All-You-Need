@@ -61,10 +61,13 @@ class GradioDialogSystem:
         )
 
         if context:
+            # 添加近期对话保持连贯性
+            for dialog in self.memory.get_recent_dialogs(5):  # 扩展至2轮对话
+                messages.append({"role": dialog['role'], "content": dialog['text']})
             # 精简记忆展示格式，突出相关性
             retrieval_content = "\n\n".join([
-                f"> {item['text'][:300]}..."  # 截取关键片段防止信息过载
-                for item in sorted(context, key=lambda x: x['score'], reverse=True)[:3]  # 仅用Top3相关记忆
+                f"> {item['text'][:500]}..."  # 截取关键片段防止信息过载
+                for item in sorted(context, key=lambda x: x['score']>0.5, reverse=True)[:3]  # 仅用Top3相关记忆
             ])
             messages.append({
                 "role": "system",
@@ -75,10 +78,6 @@ class GradioDialogSystem:
                 "role": "system",
                 "content": f"{system_prompt}\n\n[无相关记忆，用常识回答]"
             })
-        
-        # 添加近期对话保持连贯性
-        for dialog in self.memory.get_recent_dialogs(2):  # 扩展至2轮对话
-            messages.append({"role": dialog['role'], "content": dialog['text']})
         
         # 用户问题保持纯净
         messages.append({"role": "user", "content": prompt})  # 移除冗余指令
