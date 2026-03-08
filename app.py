@@ -1157,81 +1157,35 @@ def create_interface_simple():
             progress(0.6, desc="AI正在思考...")
             system.conversation_history.append({"role": "user", "content": message})
             
-            messages = []
-            
-            system_prompt = """你是一个具有长期记忆能力的AI助手。请遵循以下回答策略：
-
-**记忆检索结果分析：**
-- 以下是系统从知识库中检索到的相关信息，按可靠性排序
-- 每条结果都带有相似度分数，分数越高越相关
-- 优先基于这些检索结果回答问题
-
-**回答要求：**
-- 如果检索结果相关，请基于这些知识进行回答
-- 如果检索结果不相关，请基于你的通用知识回答
-- 回答要自然流畅，不要直接罗列检索结果
-- 适当引用检索到的关键信息支持你的回答
-
-**当前用户问题：**"""
-            
-            if search_results:
-                retrieval_content = "\n\n".join([
-                    f"【{item['type'].upper()}】相似度: {item['score']:.3f}\n{item['text']}"
-                    for item in sorted(search_results, key=lambda x: x['score'], reverse=True)
-                ])
-                messages.append({
-                    "role": "system",
-                    "content": f"{system_prompt}\n\n{retrieval_content}\n\n[用户问题]\n{message}"
-                })
-            else:
-                messages.append({
-                    "role": "system",
-                    "content": f"{system_prompt}\n\n[系统提示] 未检索到相关记忆。\n\n[用户问题]\n{message}"
-                })
-            
-            recent_dialogs = system.memory.get_recent_dialogs(3)
-            for dialog in recent_dialogs:
-                messages.append({
-                    "role": dialog['role'],
-                    "content": dialog['text']
-                })
-            
             full_response = ""
             
             try:
-                with requests.post(
-                    f"{OLLAMA_BASE_URL}/api/chat",
-                    json={"model": GENERATION_MODEL, "messages": messages, "stream": True},
-                    timeout=120,
-                    stream=True
-                ) as response:
+                # 调用函数1生成流式响应
+                for content, current_full in system.generate_response_stream(
+                    prompt=message, 
+                    context=search_results, 
+                    progress=progress
+                ):
+                    if content is None:
+                        # 流式响应结束
+                        full_response = current_full
+                        break
                     
-                    if response.status_code == 200:
-                        for line in response.iter_lines():
-                            if line:
-                                try:
-                                    chunk = json.loads(line)
-                                    if 'message' in chunk and 'content' in chunk['message']:
-                                        content = chunk['message']['content']
-                                        full_response += content
-                                        temp_history = chat_history + [(message, full_response)]
-                                        yield temp_history, search_html, temp_history
-                                except json.JSONDecodeError:
-                                    continue
-                        
-                        # 保存对话
-                        system.memory.add_dialog("user", message)
-                        system.memory.add_dialog("assistant", full_response)
-                        system.conversation_history.append({"role": "assistant", "content": full_response})
-                        
-                        if len(system.conversation_history) > MAX_DIALOG_HISTORY * 2:
-                            system.conversation_history = system.conversation_history[-MAX_DIALOG_HISTORY * 2:]
-                        
-                        yield chat_history + [(message, full_response)], search_html, chat_history + [(message, full_response)]
-                    else:
-                        error_msg = f"❌ 模型调用失败: {response.status_code}"
-                        yield chat_history + [(message, error_msg)], search_html, chat_history + [(message, error_msg)]
-                        
+                    # 更新响应
+                    full_response = current_full
+                    temp_history = chat_history + [(message, full_response)]
+                    yield temp_history, search_html, temp_history
+                
+                # 保存对话
+                system.memory.add_dialog("user", message)
+                system.memory.add_dialog("assistant", full_response)
+                system.conversation_history.append({"role": "assistant", "content": full_response})
+                
+                if len(system.conversation_history) > MAX_DIALOG_HISTORY * 2:
+                    system.conversation_history = system.conversation_history[-MAX_DIALOG_HISTORY * 2:]
+                
+                yield chat_history + [(message, full_response)], search_html, chat_history + [(message, full_response)]
+                    
             except Exception as e:
                 error_msg = f"❌ 生成回复时出错: {str(e)}"
                 yield chat_history + [(message, error_msg)], search_html, chat_history + [(message, error_msg)]
