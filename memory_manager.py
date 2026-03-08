@@ -436,58 +436,51 @@ class VectorMemoryManager:
 
     def search(self, query, top_k=TOP_K_RETRIEVAL):
         """
-        【核心修改】
-        重构搜索逻辑：优先检索知识级和段落级，最后才检索高质量的句子级。
-        最终结果会排除相似度低于0.3的结果，并确保返回完整对话对。
+        优化搜索逻辑：知识级搜索（无相似度筛选）→ 段落级搜索 → 句子级搜索
+        返回完整的对话对，包含user和assistant部分
         """
         qv = self._get_embedding(query)
         qv = self._normalize_vector(qv)
-
-        # 1. 优先知识层搜索 (顶层语义)
-        kg_res = self._knowledge_search(qv, top_k=3)
-
-        # 2. 段落级搜索 (中层语义)
-        para_res = self._vector_search(qv, top_k=5, vec_type='paragraph', min_score=0.0)
-
-        # 3. 句子级搜索 (底层细节，仅当结果不足时启用，且设高门槛)
-        # 如果前两级结果已经足够，就不需要去句子库里找了，因为句子库可能有很多干扰
-        combined_res = kg_res + para_res
-        if len(combined_res) < top_k:
-            remaining = top_k - len(combined_res)
-            # 句子级检索设置更高的分数阈值 (0.65)，确保相关性
-            sent_res = self._vector_search(qv, top_k=remaining * 2, vec_type='sentence', min_score=0.65)
-            combined_res.extend(sent_res)
-
-        # 获取完整对话上下文
-        for result in combined_res:
-            full_context = self._get_full_dialog_by_tid(result['tid'])
-            if full_context:
-                result['full_text'] = full_context
-            else:
-                # 如果没有找到完整对话，至少保留当前文本
-                result['full_text'] = result['text']
-
-        # 【新增】最终过滤：排除相似度低于0.3的结果
-        final_filtered = []
-        for result in combined_res:
-            if 'score' in result and result['score'] >= 0.3:
-                # 确保有完整的对话文本
-                if 'full_text' not in result or not result['full_text']:
-                    result['full_text'] = result.get('text', '')
-                final_filtered.append(result)
         
-        # 如果过滤后结果过少，尝试放宽限制
-        if len(final_filtered) < 2 and len(combined_res) > len(final_filtered):
-            logger.warning(f"高质量结果不足 ({len(final_filtered)}个)，放宽筛选标准")
-            # 放宽标准，但仍要求有完整对话
-            for result in combined_res:
-                if 'score' in result and result['score'] >= 0.1:  # 降低到0.1
-                    if 'full_text' not in result or not result['full_text']:
-                        result['full_text'] = result.get('text', '')
-                    final_filtered.append(result)
+        all_results = []
+        
+        # 1. 知识级搜索 - 无相似度筛选
+        kg_results = self._knowledge_search(qv, top_k=5)
+        filtered_kg_results = [r for r in kg_results if r.get('score', 0) >= 0.7][:3]  # 仅保留高相关的知识节点
+        all_results.extend(filtered_kg_results)
+        print(f"知识级搜索结果: {len(kg_results)} -> 筛选后: {len(filtered_kg_results)}")
+        
+        # 2. 段落级搜索 - 应用相似度筛选
+        para_results = self._vector_search(qv, top_k=5, vec_type='paragraph', min_score=0.0)
+        filtered_para_results = [r for r in para_results if r.get('score', 0) >= 0.3][:5]
+        all_results.extend(filtered_para_results)
+        print(f"段落级搜索结果: {len(para_results)} -> 筛选后: {len(filtered_para_results)}")
+        
+        # 3. 句子级搜索 - 仅当结果不足时启用，并应用相似度筛选
+        if len(all_results) < top_k:
+            remaining = top_k - len(all_results)
+            sent_results = self._vector_search(qv, top_k=remaining*2, vec_type='sentence', min_score=0.65)
+            filtered_sent_results = [r for r in sent_results if r.get('score', 0) >= 0.3]
+            all_results.extend(filtered_sent_results)
+        print(f"句子级搜索结果: {len(sent_results)} -> 筛选后: {len(filtered_sent_results)}")
+        
+        # 获取完整对话上下文
+        final_results = []
+        for result in all_results:
+            # 获取完整对话
+            full_dialog = self._get_full_dialog_by_tid(result['tid'])
+            
+            if full_dialog:
+                # 如果返回的是字符串格式的完整对话，直接存储
+                result['full_dialog'] = full_dialog
+            else:
+                # 如果没有找到完整对话，使用当前文本
+                result['full_dialog'] = result.get('text', '')
+            
+            final_results.append(result)
         
         # 去重和排序
-        unique_results = self._deduplicate_and_sort(final_filtered, top_k)
+        unique_results = self._deduplicate_and_sort(final_results, top_k)
         return unique_results
 
     def _knowledge_search(self, qv, top_k=5):
@@ -510,7 +503,7 @@ class VectorMemoryManager:
                         'text': meta['text'],
                         'full_text': full_context or meta['text'],  # 确保有完整文本
                         'type': 'knowledge_item',
-                        'score': float(-dists[idx]),  # 距离转分数
+                        'score': float(dists[idx]),  # 距离转分数
                         'cluster_id': node.node_id
                     })
         return results
