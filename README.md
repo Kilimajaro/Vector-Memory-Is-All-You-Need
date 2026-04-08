@@ -1,140 +1,120 @@
-# Vector-Memory-Is-All-You-Need: An Intelligent Memory Dialogue System
+# BIMS: A Brain-Inspired Memory System for Long-Context Dialogue
 
-An advanced dialogue system with vector-centric dynamic clustering memory module, enabling long-term memory management and semantic association reasoning. This system embodies a pragmatic elegance​ through a harmonious balance of simplicity and sophistication. By embracing a vector-centric tri-layer hierarchy, it eliminates unnecessary complexity while delivering robust memory management:
+**Languages:** [English](README.md) | [中文](README.zh.md)
 
-**Pragmatism​** is embedded in its no-loss storage​ (plain-text talk.txt), incremental updates​ (avoiding full reindexing), and pointer-based deduplication​ (storing only tid offsets instead of redundant text). These design choices ensure efficiency, scalability, and minimal resource overhead.
+This repository implements **Brain-Inspired Memory System (BIMS)** from the paper *A Brain-Inspired Memory System for Long-Context Dialogue Agents* (Linrui Xu, 2026). It turns ideas from **Complementary Learning Systems (CLS)** into a computational design: **episodic** vs **semantic** memory, **dual-phase clustering** for consolidation, and **adaptive retrieval** (associative expansion and a **temporal reasoning** mode) to balance **stability** and **plasticity** in very long conversations.
 
-**Elegance​** arises from its dynamic clustering engine, which transforms raw data into semantic hierarchies organically, and its hybrid retrieval pipeline, which synergizes knowledge graphs and vector search for optimal accuracy.
-
-In essence, the architecture achieves elegance through constraint: by limiting itself to three core layers and two retrieval pathways, it avoids over-engineering while solving real-world challenges like long-term memory decay, contextual relevance, and computational efficiency. This philosophy ensures the system remains both intellectually satisfying and operationally effective.
+> **Note:** The paper’s experiments use a unified base LLM (e.g. **GPT-OSS-20B**). This codebase defaults to **Ollama** for local embeddings and generation. Reported numbers are from the paper; local runs may differ.
 
 ---
 
-## Core Features
+## Highlights
 
-1. **Tri-Layer Memory Architecture**
-   - **Information Layer**: Pure text storage (`talk.txt`)
-   - **Data Layer**: Hierarchical vector database (FAISS index)
-   - **Knowledge Layer**: Dynamic clustering semantic network
-
-2. **Intelligent Retrieval Mechanism**
-   - Hybrid search: Knowledge graph + vector similarity dual-channel recall
-   - Temporal enhancement: Time-weighted semantic scoring
-   - Multimodal support (planned: speech/image input)
-
-3. **Self-Evolving Capabilities**
-   - Incremental updates: Event-driven partial recomputation
-   - Decay mechanism: Time-weighted semantic scoring
-   - Cold-start optimization: Rapid clustering for new topics
+- **Problem:** Fixed context windows and weak consolidation hurt long-horizon dialogue—cross-session facts, temporal order, and argumentative coherence.
+- **Idea:** Hippocampus–cortex–style split—episodic side stores **time-anchored utterances**; semantic side builds **clustered summaries** of meaning. Two-phase clustering maps **fast encoding** and **slow integration**.
+- **Reported results** (test sets, paper Table 2): On **LongMemEval** and **LoCoMo**, BIMS achieves **QA correctness** of **70.7%** and **68.2%**, and **retrieval recall (RR)** of **0.595** and **0.521**. Ablations show **dual-phase clustering** and the **temporal module** matter most for overall and temporal tasks.
 
 ---
 
-## Quick Start Guide
+## Mapping: Paper ↔ This Codebase
 
-### Environment Setup
+| Concept (paper) | Where it lives (code) |
+|-----------------|------------------------|
+| Episodic memory (paragraph/sentence vectors, timestamps) | `ParagraphNode` / `SentenceNode`, FAISS `VectorStore`, raw text in `data/talk.txt` |
+| Semantic memory (cluster centroids + member paragraphs) | `KnowledgeNode`, `knowledge_graph`, `ClusteringLayer` (BIRCH, etc.) on paragraph vectors |
+| Dual-phase consolidation: online clustering + slow merge | `add_dialog` → `_update_clusters`; `_hippocampal_consolidation` merges clusters and prunes redundancy |
+| Hybrid score: semantics × (semantic weight + recency weight × decay) | `search`, `_recency_weight`, `SEMANTIC_WEIGHT` / `RECENCY_WEIGHT` |
+| Implicit associative expansion (no explicit relation graph) | `_associative_retrieval` extends beyond top clusters by centroid similarity |
+| Temporal reasoning mode | `is_temporal_task(task_type)` (e.g. `temporal-reasoning`) and `search(..., is_temporal_task=True)`—more paragraph hits, `RECENT_TEMPORAL_TURNS`, time-ordered sorting |
+| Summary semantic nodes | `SummaryNode`, `_update_summary_memory`, `_summary_search` |
+| Ablation switches | `VectorMemoryManager(..., ablation={...})`: `no_temporal`, `no_assoc`, `single_stage_cluster`, `balanced_sem_rec_weights` |
+
+Engineering extras: **FAISS IVFPQ** when large enough, **LRU** cache for embeddings and search, cluster metrics and `report_retrieval_success`.
+
+---
+
+## Repository layout
+
+```
+├── app.py                 # Gradio web UI
+├── memory_manager.py      # BIMS core: storage, clustering, retrieval
+├── config.py              # Paths and Ollama model names
+├── ablation_eval.py       # LongMemEval subset ablations
+└── eval/
+    ├── eval_new.py        # LongMemEval evaluation (Ollama)
+    └── quick_eval.py      # Lightweight smoke tests
+```
+
+Data and indexes default to `data/talk.txt`, `data/vectors/`, `data/knowledge/` (see `config.py`).
+
+---
+
+## Requirements
+
+- **Python 3.10+** (recommended)
+- **Ollama** with embedding and chat models matching `config.py` (or your own names)
+
+Install Python dependencies:
 
 ```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Start Ollama service (example)
-ollama serve
 ```
 
-### Run the System
+GPU users may replace `faiss-cpu` with a suitable `faiss-gpu` build for their CUDA version; the code imports `faiss` the same way.
+
+---
+
+## Quick start
 
 ```bash
-# Start Gradio interface
+ollama serve
+
 python app.py
-
-# Access via web browser:
-# http://localhost:7860
+# Open http://localhost:7860
 ```
+
+Main knobs: **`config.py`** — `OLLAMA_BASE_URL`, `EMBEDDING_MODEL`, `GENERATION_MODEL`, `VECTOR_DIM`, etc.
 
 ---
 
-## Configuration Parameters
+## Key hyperparameters (paper Table 1; see `memory_manager.py`)
 
-Key parameters in `config.py`:
+| Parameter | Role | Default (code) |
+|-----------|------|----------------|
+| `MIN_CLUSTER_SIZE` | Min paragraphs for a stable cluster | 3 |
+| `MERGE_SIMILARITY_THRESHOLD` | Merge threshold θ_M in slow consolidation | 0.2 |
+| `REDUNDANT_SIMILARITY_THRESHOLD` | Drop near-duplicate vectors | 0.85 |
+| `SEMANTIC_WEIGHT` / `RECENCY_WEIGHT` | α vs recency in retrieval | 0.7 / 0.3 |
+| `CLUSTER_UPDATE_THRESHOLD` | New entries before a clustering refresh | 4 |
+| `SUMMARY_UPDATE_THRESHOLD` | New paragraphs before a new summary node | 20 |
+| `ASSOCIATIVE_EXPAND_CLUSTERS` | Clusters to explore in associative expansion | 3 |
+| `MAX_PARAS_PER_CLUSTER` | Max paragraphs returned per cluster | 3 |
+| `RECENT_TEMPORAL_TURNS` | Recent turns to add in temporal mode (∆t window) | 6 |
+| `MIN_SUMMARY_SIMILARITY`, etc. | Summary/ knowledge thresholds | Overridable via `eval_config.json` |
 
-```python
-# Model Configuration
-OLLAMA_BASE_URL = "http://localhost:11434"  # Ollama API endpoint
-EMBEDDING_MODEL = "nomic-embed-text-v2-moe:latest"  # Embedding model
-GENERATION_MODEL = "qwen3:8b"  # Response generation model
-
-# System Parameters
-VECTOR_DIM = 768  # Vector dimensionality
-MAX_DIALOG_HISTORY = 50  # Maximum conversation history length
-CACHE_SIZE = 1000  # Cache capacity for frequent queries
-CLUSTER_UPDATE_THRESHOLD = 50  # Trigger clustering after N new entries
-
-# Advanced Parameters
-GPU_DEVICE = "0"  # Specify GPU device (e.g., "0" for first GPU)
-GPU_LAYERS = -1  # Use all available layers (-1) or specify number
-INFERENCE_TIMEOUT = 120  # Inference timeout in seconds
-```
+`CLUSTER_UPDATE_THRESHOLD` also appears in `config.py`; **the constants at the top of `memory_manager.py` are authoritative** for tuning aligned with the paper.
 
 ---
 
-## Key Modifications Needed
+## Evaluation & ablations
 
-### 1. Ollama Model Prompts
-Update the system prompts in `gradio_interface.py`:
+- **LongMemEval** (from repo root):  
+  `python eval/eval_new.py --dataset oracle --sample_size 500 --config eval_config.json`  
+  Prepare `eval_config.json` and dataset paths (`benchmark_path`, etc. in the script defaults).
+- **Ablations:**  
+  `python ablation_eval.py --sample_size 100 --output_dir results/ablation`  
+  Compares full BIMS vs. variants without temporal handling, associative retrieval, dual-phase clustering, or semantic-weight emphasis (paper Table 4).
 
-```python
-# Knowledge retrieval prompt (modify as needed)
-system_prompt = """You are an AI assistant with long-term memory capabilities. Follow these rules when answering:
-
-1. Analyze retrieved memory content first
-2. Combine retrieved results with the current question
-3. Prioritize memory-based answers if relevant
-4. Use general knowledge only if memory results are irrelevant
-5. Provide natural, coherent answers without listing results directly
-6. Properly cite key information from retrieved content
-
-Retrieved memory snippets:
-{retrieval_content}
-
-Current user question:
-{question}"""
-```
-
-### 2. Clustering Parameters
-Modify clustering settings in `memory_manager.py`:
-
-```python
-# Dynamic clustering parameters
-MIN_CLUSTER_SIZE = 5  # Minimum cluster size
-MAX_CLUSTERS = 20  # Maximum number of clusters
-CLUSTER_UPDATE_THRESHOLD = 50  # Trigger clustering after N new entries
-```
+Ensure your **judge / generation** model is available in Ollama before running eval.
 
 ---
 
-### 1. Adding New Data Sources
-Implement the `DataLoader` interface:
-```python
-class CustomDataLoader(DataLoaderBase):
-    def load(self):
-        data = load_custom_data()
-        embeddings = embed_data(data)
-        store_embeddings(embeddings)
-```
+## Citation
 
-### 2. Custom Evaluation Metrics
-Define custom metrics using scikit-learn:
-```python
-from sklearn.metrics import make_scorer
-
-def custom_f1_score(y_true, y_pred):
-    return f1_score(y_true, y_pred, average='weighted')
-
-scoring = {'custom_f1': make_scorer(custom_f1_score)}
-```
+Please cite the paper if you use this idea or codebase. Correspondence: `231224006@cupl.edu.cn`.
 
 ---
+
+## Disclaimer
+
+Empirical claims, limitations, and future work follow **Sections 5–7** of the paper. This code is provided as-is for research and reproduction.

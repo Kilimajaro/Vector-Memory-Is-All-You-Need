@@ -1,7 +1,7 @@
 import gradio as gr
 import requests
 from datetime import datetime
-from memory_manager import VectorMemoryManager
+from memory_manager_new import VectorMemoryManager
 from config import *
 import json
 
